@@ -1,0 +1,139 @@
+#!/usr/bin/python
+#
+# copyright 2008 Angus Ainslie <angus.ainslie@gmail.com>
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+import os
+import sys
+import dbus
+from dbus.mainloop.glib import DBusGMainLoop
+import gobject
+import time
+import logging
+
+class Main:   
+    def delete_event(self, widget, event, data=None):
+        return False
+
+    def destroy(self, widget, data=None):
+        self.loop.quit()
+
+    def __init__(self):
+	logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(levelname)s %(message)s',
+                    filename='/tmp/sms-sentry.log',
+                    filemode='w')
+
+	logging.debug( 'init' )
+
+	self.usaged = False
+
+	while not self.usaged :
+    	    try :
+    	        DBusGMainLoop(set_as_default=True)
+
+	        self.format = 'TEXT'
+
+	        self.bus = dbus.SystemBus()
+	    
+	        self.usage_obj = self.bus.get_object('org.freesmartphone.ousaged', '/org/freesmartphone/Usage')
+	        usage_iface = dbus.Interface(self.usage_obj, 'org.freesmartphone.Usage')
+	        self.usaged = True
+	    except Exception, e :
+	        logging.error( "DBus exception" ) 
+		print e 
+	        time.sleep( 10 )
+
+    def register( self ) :
+	logging.debug( 'register' )
+
+	self.registered = False
+
+	while not self.registered :
+	    try :
+		self.usage_obj.RequestResource("GSM")
+		self.registered = True
+	    except :
+		logging.debug( 'registration failed - waiting 30 seconds' )
+		time.sleep( 30 )
+
+	gsm_device_obj = self.bus.get_object('org.freesmartphone.ogsmd', '/org/freesmartphone/GSM/Device')
+	gsm_iface = dbus.Interface(gsm_device_obj, 'org.freesmartphone.GSM')
+
+	self.sms_iface = dbus.Interface(gsm_device_obj, 'org.freesmartphone.GSM.SMS')
+	self.cb_iface = dbus.Interface(gsm_device_obj, 'org.freesmartphone.GSM.CD')
+	self.sim_iface = dbus.Interface(gsm_device_obj, 'org.freesmartphone.GSM.SIM')
+
+	self.sms_iface.connect_to_signal( "IncomingMessage", self.on_incoming_message)
+	self.sim_iface.connect_to_signal( "IncomingStoredMessage", self.on_incoming_stored_message)
+	
+    def on_incoming_stored_message( self, i ) :
+	print "Incoming stored message"
+	# message (dbus.String(u'unread'), dbus.String(u'5000'), dbus.String(u'Angus / sentry'), dbus.Dictionary({dbus.String(u'timestamp'): dbus.String(u'Fri Dec 19 21:33:42 2008 +2800', variant_level=1), dbus.String(u'direction'): dbus.String(u'MT', variant_level=1)}, signature=dbus.Signature('sv')))
+	( status, sender, contents, properties ) = self.sim_iface.RetrieveMessage( i ) 
+	print "message", self.sim_iface.RetrieveMessage( i ) 
+	self.on_incoming_message( sender, contents, properties )
+
+    def on_incoming_message( self, sender, contents, properties ) :
+        print "Message sender", sender
+        print "Contents", contents
+        for prop in properties : 
+	    print "Property", prop, properties[prop]
+
+	if contents.startswith( "sentry:" ) :
+	    if contents.endswith( "location" ) :
+		print "Getting position"
+	        location = self.get_location()
+	        self.sms_iface.SendMessage( sender, location, { 'type':'SMS_DELIVER', 'alphabet':'gsm' }  ) 
+
+    def get_location( self ) :
+	self.usage_obj.RequestResource("GPS")
+       	gypsy_obj = self.bus.get_object( 'org.freesmartphone.ogpsd', '/org/freedesktop/Gypsy' )
+
+	self.position_control = dbus.Interface( gypsy_obj, 'org.freedesktop.Gypsy.Server' )
+        self.position_iface = dbus.Interface( gypsy_obj, 'org.freedesktop.Gypsy.Position' )
+
+	position = self.position_iface.GetPosition()
+
+	ttf = 0
+
+	while position[0] < 3 :
+	    time.sleep( 10 )
+	    ttf = ttf + 10
+	    position = self.position_iface.GetPosition()
+
+	if position[0] == 7 :
+	    fix = '3D'
+	else :
+	    fix = '2D'
+
+	if self.format == 'CSV' :
+	    pos_str = str( position[1] ) + ", " + fix + ", " + str( position[2] ) + ", " + str( position[3] ) + ", " + str( position[4] )
+	else :
+	    pos_str = 'time: ' + str( position[1] ) + " fix:" + fix + " lat:" + str( position[2] ) + " lon:" + str( position[3] ) + " alt:" + str( position[4] )
+		
+	print "time:", ttf
+        print "Position", pos_str
+
+	return pos_str 
+
+    def main(self):
+	self.loop = gobject.MainLoop()
+    	self.loop.run()
+    
+run = Main()
+run.register()
+run.main()
